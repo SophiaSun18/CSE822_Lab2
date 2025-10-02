@@ -59,7 +59,55 @@ __global__ void mandelbrot_gpu_vector_ilp(
     uint32_t max_iters,
     uint32_t *out /* pointer to GPU memory */
 ) {
-    /* your (GPU) code here... */
+    int t = threadIdx.x;
+    const float scalar = window_zoom / float(img_size);
+
+    for (uint64_t i = 0; i < img_size; ++i) {
+        float cy = float(i) * scalar + window_y;
+        for (uint64_t j = t; j + 32 < img_size; j+=2*blockDim.x) {
+            // Get the plane coordinate X for the image pixel.
+            float cx_1 = float(j) * scalar + window_x;
+            float cx_2 = float(j + blockDim.x)* scalar + window_x;
+
+            // Innermost loop: start the recursion from z = 0.
+            float x2_1 = 0.0f;
+            float y2_1 = 0.0f;
+            float w_1 = 0.0f;
+            uint32_t iters_1 = 0;
+            float sum_1 = x2_1 + y2_1;
+            while (sum_1 <= 4.0f && iters_1 < max_iters) {
+                float x_1 = x2_1 - y2_1 + cx_1;
+                float y_1 = w_1 - sum_1 + cy;
+                x2_1 = x_1 * x_1;
+                y2_1 = y_1 * y_1;
+                float z_1 = x_1 + y_1;
+                w_1 = z_1 * z_1;
+                sum_1 = x2_1 + y2_1;
+                ++iters_1;
+            }
+
+            // Innermost loop: start the recursion from z = 0.
+            float x2_2 = 0.0f;
+            float y2_2 = 0.0f;
+            float w_2 = 0.0f;
+            uint32_t iters_2 = 0;
+            float sum_2 = x2_2 + y2_2;
+            while (sum_2 <= 4.0f && iters_2 < max_iters) {
+                float x_2 = x2_2 - y2_2 + cx_2;
+                float y_2 = w_2 - sum_2 + cy;
+                x2_2 = x_2 * x_2;
+                y2_2 = y_2 * y_2;
+                float z_2 = x_2 + y_2;
+                w_2 = z_2 * z_2;
+                sum_2 = x2_2 + y2_2;
+                ++iters_2;
+            }
+
+            // Write result.
+            out[i * img_size + j] = iters_1;
+            out[i * img_size + j + blockDim.x] = iters_2;
+        }
+    }
 }
 
 void launch_mandelbrot_gpu_vector_ilp(
@@ -68,6 +116,7 @@ void launch_mandelbrot_gpu_vector_ilp(
     uint32_t *out /* pointer to GPU memory */
 ) {
     /* your (CPU) code here... */
+    mandelbrot_gpu_vector_ilp<<<1, 32>>>(img_size, max_iters, out);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
