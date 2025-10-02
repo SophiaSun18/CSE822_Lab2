@@ -1,0 +1,14 @@
+---
+AlignAfterOpenBracket: AlwaysBreak
+AlignConsecutiveMacros: 'false'
+AlignConsecutiveAssignments: 'false'
+AlignConsecutiveDeclarations: 'false'
+AlignEscapedNewlines: DontAlign
+AlignOperands: 'false'
+AllowAllArgumentsOnNextLine: 'false'
+AllowAllConstructorInitializersOnNextLine: 'false'
+AllowAllParametersOfDeclarationOnNextLine: 'false'
+BinPackArguments: 'false'
+BinPackParameters: 'false'
+IndentWidth: 4
+ColumnLimit: 90
