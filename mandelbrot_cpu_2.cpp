@@ -75,7 +75,6 @@ void mandelbrot_cpu_vector_ilp(uint32_t img_size, uint32_t max_iters, uint32_t *
     const float scale_scalar = window_zoom / float(img_size);
     const __m256 v_scale = _mm256_set1_ps(scale_scalar);
     const __m256 v_wx = _mm256_set1_ps(window_x);
-    const __m256 v_wy = _mm256_set1_ps(window_y);
     const __m256 r_4 = _mm256_set1_ps(4.0f);
     const __m256i one = _mm256_set1_epi32(1);
 
@@ -360,11 +359,131 @@ void mandelbrot_cpu_vector_multicore_multithread(uint32_t img_size, uint32_t max
 ////////////////////////////////////////////////////////////////////////////////
 // Vector + Multi-core + Multi-thread-per-core + ILP
 
-void mandelbrot_cpu_vector_multicore_multithread_ilp(
-    uint32_t img_size,
-    uint32_t max_iters,
-    uint32_t *out) {
-    // TODO: Implement this function.
+void mandelbrot_cpu_vector_multicore_multithread_ilp_thread(uint32_t img_size, uint32_t max_iters, uint32_t thread_id, uint32_t *out) {
+    const float scale_scalar = window_zoom / float(img_size);
+    const __m256 v_scale = _mm256_set1_ps(scale_scalar);
+    const __m256 v_wx = _mm256_set1_ps(window_x);
+    const __m256 r_4 = _mm256_set1_ps(4.0f);
+    const __m256i one = _mm256_set1_epi32(1);
+
+    int TOTAL_THREAD = NUM_THREAD_PER_CORE * NUM_CORE;
+
+    for (uint64_t i = thread_id; i < img_size; i+=TOTAL_THREAD) {
+        // Compute cy_scalar repeatedly, which is cheaper than computing cx.
+        float cy_scalar = float(i) * scale_scalar + window_y;;
+        __m256 cy = _mm256_set1_ps(cy_scalar);
+
+        for (uint64_t j = 0; j + 2 * VECTOR_SIZE <= img_size; j+=2*VECTOR_SIZE) {
+            // Get the plane coordinate X for the image pixel.
+            __m256 cx_1 = _mm256_set_ps(
+                float(j + 7), float(j + 6), float(j + 5), float(j + 4),
+                float(j + 3), float(j + 2), float(j + 1), float(j));
+            cx_1 = _mm256_add_ps(_mm256_mul_ps(cx_1, v_scale), v_wx);
+
+            __m256 cx_2 = _mm256_set_ps(
+                float(j + 15), float(j + 14), float(j + 13), float(j + 12),
+                float(j + 11), float(j + 10), float(j + 9), float(j + 8));
+            cx_2 = _mm256_add_ps(_mm256_mul_ps(cx_2, v_scale), v_wx);
+
+            // Innermost loop: start the recursion from z = 0.
+            __m256 x2_1 = _mm256_set1_ps(0.0f);
+            __m256 y2_1 = _mm256_set1_ps(0.0f);
+            __m256 w_1 = _mm256_set1_ps(0.0f);
+            __m256i iters_1 = _mm256_set1_epi32(0);
+
+            __m256 x2_2 = _mm256_set1_ps(0.0f);
+            __m256 y2_2 = _mm256_set1_ps(0.0f);
+            __m256 w_2 = _mm256_set1_ps(0.0f);
+            __m256i iters_2 = _mm256_set1_epi32(0);
+
+            for (int k = 0; k < max_iters; k++) {
+
+                // Calculate x2 + y2 and check if sum <= 4.0f to generate new mask.
+                __m256 sum_1 = _mm256_add_ps(x2_1, y2_1);
+                __m256 mask_ps_1 = _mm256_cmp_ps(sum_1, r_4, _CMP_LE_OQ);
+                __m256i mask_1 = _mm256_castps_si256(mask_ps_1);
+
+                __m256 sum_2 = _mm256_add_ps(x2_2, y2_2);
+                __m256 mask_ps_2 = _mm256_cmp_ps(sum_2, r_4, _CMP_LE_OQ);
+                __m256i mask_2 = _mm256_castps_si256(mask_ps_2);
+
+                // Early exit if both groups are done
+                if (_mm256_testz_si256(mask_1, mask_1) && _mm256_testz_si256(mask_2, mask_2)) {
+                    break;
+                }
+                
+                // Group A
+                if (!_mm256_testz_si256(mask_1, mask_1)) {
+                    __m256 x_new_1 = _mm256_add_ps(_mm256_sub_ps(x2_1, y2_1), cx_1);
+                    __m256 y_new_1 = _mm256_add_ps(_mm256_sub_ps(w_1, sum_1), cy);
+                    __m256 z_new_1 = _mm256_add_ps(x_new_1, y_new_1);
+                    __m256 w_new_1 = _mm256_mul_ps(z_new_1, z_new_1);
+                    __m256 x2_new_1 = _mm256_mul_ps(x_new_1, x_new_1);
+                    __m256 y2_new_1 = _mm256_mul_ps(y_new_1, y_new_1);
+
+                    // Update x2 and y2 according to the mask.
+                    x2_1 = _mm256_blendv_ps(x2_1, x2_new_1, mask_ps_1);
+                    y2_1 = _mm256_blendv_ps(y2_1, y2_new_1, mask_ps_1);
+                    w_1 = _mm256_blendv_ps(w_1, w_new_1, mask_ps_1);
+
+                    // Update iters based on the number of active elements.
+                    iters_1 = _mm256_add_epi32(iters_1, _mm256_and_si256(one, mask_1));
+                }
+
+                // Group B
+                if (!_mm256_testz_si256(mask_2, mask_2)) {                
+                    __m256 x_new_2 = _mm256_add_ps(_mm256_sub_ps(x2_2, y2_2), cx_2);
+                    __m256 y_new_2 = _mm256_add_ps(_mm256_sub_ps(w_2, sum_2), cy);
+                    __m256 z_new_2 = _mm256_add_ps(x_new_2, y_new_2);
+                    __m256 w_new_2 = _mm256_mul_ps(z_new_2, z_new_2);
+                    __m256 x2_new_2 = _mm256_mul_ps(x_new_2, x_new_2);
+                    __m256 y2_new_2 = _mm256_mul_ps(y_new_2, y_new_2);
+
+                    // Update x2 and y2 according to the mask.
+                    x2_2 = _mm256_blendv_ps(x2_2, x2_new_2, mask_ps_2);
+                    y2_2 = _mm256_blendv_ps(y2_2, y2_new_2, mask_ps_2);
+                    w_2 = _mm256_blendv_ps(w_2, w_new_2, mask_ps_2);
+
+                    // Update iters based on the number of active elements.
+                    iters_2 = _mm256_add_epi32(iters_2, _mm256_and_si256(one, mask_2));
+                }
+            }
+
+            // Write result.
+            _mm256_storeu_si256((__m256i*)&out[i*img_size + j], iters_1);
+            _mm256_storeu_si256((__m256i*)&out[i*img_size + j + VECTOR_SIZE], iters_2);
+        }
+    }
+}
+
+void* mandelbrot_cpu_vector_multicore_multithread_ilp_thread_wrapper(void* arg) {
+    thread_args* args = (thread_args*) arg;
+    mandelbrot_cpu_vector_multicore_multithread_ilp_thread(
+        args->img_size,
+        args->max_iters,
+        args->thread_id,
+        args->out
+    );
+    return NULL;
+}
+
+void mandelbrot_cpu_vector_multicore_multithread_ilp(uint32_t img_size, uint32_t max_iters, uint32_t *out) {
+    int TOTAL_THREAD = NUM_THREAD_PER_CORE * NUM_CORE;
+
+    pthread_t threads[TOTAL_THREAD];
+    thread_args args[TOTAL_THREAD];
+
+    for (int i = 0; i < TOTAL_THREAD; ++i) {
+        args[i].img_size = img_size;
+        args[i].max_iters = max_iters;
+        args[i].thread_id = i;
+        args[i].out = out;
+        pthread_create(&threads[i], NULL, mandelbrot_cpu_vector_multicore_multithread_ilp_thread_wrapper, &args[i]);
+    }
+
+    for (int j = 0; j < TOTAL_THREAD; ++j) {
+        pthread_join(threads[j], NULL);
+    }
 }
 
 /// <--- /your code here --->
