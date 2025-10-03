@@ -15,7 +15,7 @@ constexpr float window_y = 0.131825904 - 0.5 * window_zoom;
 constexpr uint32_t default_max_iters = 2000;
 const int VECTOR_SIZE = 8;
 int NUM_THREAD_SINGLE = 8;
-int NUM_THREAD_PER_CORE = 2;
+int NUM_THREAD_PER_CORE = 4;
 int NUM_CORE = 24;
 
 // CPU Scalar Mandelbrot set generation.
