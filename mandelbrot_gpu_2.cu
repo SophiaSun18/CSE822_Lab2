@@ -64,7 +64,7 @@ __global__ void mandelbrot_gpu_vector_ilp(
 
     for (uint64_t i = 0; i < img_size; ++i) {
         float cy = float(i) * scalar + window_y;
-        for (uint64_t j = t; j + 32 < img_size; j+=2*blockDim.x) {
+        for (uint64_t j = t; j + blockDim.x < img_size; j+=2*blockDim.x) {
             // Get the plane coordinate X for the image pixel.
             float cx_1 = float(j) * scalar + window_x;
             float cx_2 = float(j + blockDim.x)* scalar + window_x;
