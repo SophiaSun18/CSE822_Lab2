@@ -190,18 +190,18 @@ void mandelbrot_cpu_vector_thread(uint32_t img_size, uint32_t max_iters, uint32_
     uint64_t end = start + chunk_size;
     if (end > img_size) end = img_size;
 
-    for (uint64_t i = start; i < end; i++) {
+    for (uint64_t j = start; j + vector_size <= end; j += vector_size) {
+        // Get the plane coordinate X for the image pixel.
+        // cx can be shared by all current rows.
+        __m256 cx = _mm256_set_ps(
+            float(j + 7), float(j + 6), float(j + 5), float(j + 4),
+            float(j + 3), float(j + 2), float(j + 1), float(j));
+        cx = _mm256_add_ps(_mm256_mul_ps(cx, v_scale), v_wx);
 
-        // cy_scalar can be shared by all current j.
-        float cy_scalar = (float(i) / float(img_size)) * window_zoom + window_y;;
-        __m256 cy = _mm256_set1_ps(cy_scalar);
-
-        for (uint64_t j = 0; j + vector_size <= img_size; j += vector_size) {
-            // Get the plane coordinate X for the image pixel.
-            __m256 cx = _mm256_set_ps(
-                float(j + 7), float(j + 6), float(j + 5), float(j + 4),
-                float(j + 3), float(j + 2), float(j + 1), float(j));
-            cx = _mm256_add_ps(_mm256_mul_ps(cx, v_scale), v_wx);
+        for (uint64_t i = 0; i < img_size; i++) {
+            // Compute cy_scalar repeatedly, which is cheaper than computing cx.
+            float cy_scalar = (float(i) / float(img_size)) * window_zoom + window_y;;
+            __m256 cy = _mm256_set1_ps(cy_scalar);
 
             // Innermost loop: start the recursion from z = 0.
             __m256 x2 = _mm256_set1_ps(0.0f);
