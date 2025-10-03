@@ -15,6 +15,8 @@ constexpr float window_y = 0.131825904 - 0.5 * window_zoom;
 constexpr uint32_t default_max_iters = 2000;
 const int VECTOR_SIZE = 8;
 int NUM_THREAD_SINGLE = 8;
+int NUM_THREAD_PER_CORE = 2;
+int NUM_CORE = 24;
 
 // CPU Scalar Mandelbrot set generation.
 // Based on the "optimized escape time algorithm" in
@@ -180,27 +182,21 @@ void mandelbrot_cpu_vector_thread(uint32_t img_size, uint32_t max_iters, uint32_
     const float scale_scalar = window_zoom / float(img_size);
     const __m256 v_scale = _mm256_set1_ps(scale_scalar);
     const __m256 v_wx = _mm256_set1_ps(window_x);
-    const __m256 v_wy = _mm256_set1_ps(window_y);
     const __m256 r_4 = _mm256_set1_ps(4.0f);
     const __m256i one = _mm256_set1_epi32(1);
 
-    const uint32_t chunk_size = (img_size + NUM_THREAD_SINGLE - 1) / NUM_THREAD_SINGLE;
-    uint64_t start = thread_id * chunk_size;
-    uint64_t end = start + chunk_size;
-    if (end > img_size) end = img_size;
+    for (uint64_t i = thread_id; i < img_size; i+=NUM_THREAD_SINGLE) {
+        // Compute cy_scalar repeatedly, which is cheaper than computing cx.
+        float cy_scalar = float(i) * scale_scalar + window_y;;
+        __m256 cy = _mm256_set1_ps(cy_scalar);
 
-    for (uint64_t j = start; j + VECTOR_SIZE <= end; j += VECTOR_SIZE) {
-        // Get the plane coordinate X for the image pixel.
-        // cx can be shared by all current rows.
-        __m256 cx = _mm256_set_ps(
-            float(j + 7), float(j + 6), float(j + 5), float(j + 4),
-            float(j + 3), float(j + 2), float(j + 1), float(j));
-        cx = _mm256_add_ps(_mm256_mul_ps(cx, v_scale), v_wx);
-
-        for (uint64_t i = 0; i < img_size; i++) {
-            // Compute cy_scalar repeatedly, which is cheaper than computing cx.
-            float cy_scalar = (float(i) / float(img_size)) * window_zoom + window_y;;
-            __m256 cy = _mm256_set1_ps(cy_scalar);
+        for (uint64_t j = 0; j + VECTOR_SIZE <= img_size; j+=VECTOR_SIZE) {
+            // Get the plane coordinate X for the image pixel.
+            // cx can be shared by all current rows.
+            __m256 cx = _mm256_set_ps(
+                float(j + 7), float(j + 6), float(j + 5), float(j + 4),
+                float(j + 3), float(j + 2), float(j + 1), float(j));
+            cx = _mm256_add_ps(_mm256_mul_ps(cx, v_scale), v_wx);
 
             // Innermost loop: start the recursion from z = 0.
             __m256 x2 = _mm256_set1_ps(0.0f);
@@ -271,11 +267,94 @@ void mandelbrot_cpu_vector_multicore(uint32_t img_size, uint32_t max_iters, uint
 ////////////////////////////////////////////////////////////////////////////////
 // Vector + Multi-core + Multi-thread-per-core
 
-void mandelbrot_cpu_vector_multicore_multithread(
-    uint32_t img_size,
-    uint32_t max_iters,
-    uint32_t *out) {
-    // TODO: Implement this function.
+void mandelbrot_cpu_vector_multithread(uint32_t img_size, uint32_t max_iters, uint32_t thread_id, uint32_t *out) {
+    const float scale_scalar = window_zoom / float(img_size);
+    const __m256 v_scale = _mm256_set1_ps(scale_scalar);
+    const __m256 v_wx = _mm256_set1_ps(window_x);
+    const __m256 r_4 = _mm256_set1_ps(4.0f);
+    const __m256i one = _mm256_set1_epi32(1);
+
+    int TOTAL_THREAD = NUM_THREAD_PER_CORE * NUM_CORE;
+
+    for (uint64_t i = thread_id; i < img_size; i+=TOTAL_THREAD) {
+        // Compute cy_scalar repeatedly, which is cheaper than computing cx.
+        float cy_scalar = float(i) * scale_scalar + window_y;;
+        __m256 cy = _mm256_set1_ps(cy_scalar);
+
+        for (uint64_t j = 0; j + VECTOR_SIZE <= img_size; j+=VECTOR_SIZE) {
+            // Get the plane coordinate X for the image pixel.
+            // cx can be shared by all current rows.
+            __m256 cx = _mm256_set_ps(
+                float(j + 7), float(j + 6), float(j + 5), float(j + 4),
+                float(j + 3), float(j + 2), float(j + 1), float(j));
+            cx = _mm256_add_ps(_mm256_mul_ps(cx, v_scale), v_wx);
+
+            // Innermost loop: start the recursion from z = 0.
+            __m256 x2 = _mm256_set1_ps(0.0f);
+            __m256 y2 = _mm256_set1_ps(0.0f);
+            __m256 w = _mm256_set1_ps(0.0f);
+            __m256i iters = _mm256_set1_epi32(0);
+
+            for (int k = 0; k < max_iters; k++) {
+
+                // Calculate x2 + y2 and check if sum <= 4.0f to generate new mask.
+                __m256 sum = _mm256_add_ps(x2, y2);
+                __m256 mask_ps = _mm256_cmp_ps(sum, r_4, _CMP_LE_OQ);
+                __m256i mask = _mm256_castps_si256(mask_ps);
+
+                // Early exit if both groups are done
+                if (_mm256_testz_si256(mask, mask)) break;
+
+                __m256 x_new = _mm256_add_ps(_mm256_sub_ps(x2, y2), cx);
+                __m256 y_new = _mm256_add_ps(_mm256_sub_ps(w, sum), cy);
+                __m256 z_new = _mm256_add_ps(x_new, y_new);
+                __m256 w_new = _mm256_mul_ps(z_new, z_new);
+                __m256 x2_new = _mm256_mul_ps(x_new, x_new);
+                __m256 y2_new = _mm256_mul_ps(y_new, y_new);
+
+                // Update x2 and y2 according to the mask.
+                x2 = _mm256_blendv_ps(x2, x2_new, mask_ps);
+                y2 = _mm256_blendv_ps(y2, y2_new, mask_ps);
+                w = _mm256_blendv_ps(w, w_new, mask_ps);
+
+                // Update iters based on the number of active elements.
+                iters = _mm256_add_epi32(iters, _mm256_and_si256(one, mask));
+            }
+
+            // Write result.
+            _mm256_storeu_si256((__m256i*)&out[i*img_size + j], iters);
+        }
+    }
+}
+
+void* mandelbrot_cpu_vector_multithread_wrapper(void* arg) {
+    thread_args* args = (thread_args*) arg;
+    mandelbrot_cpu_vector_multithread(
+        args->img_size,
+        args->max_iters,
+        args->thread_id,
+        args->out
+    );
+    return NULL;
+}
+
+void mandelbrot_cpu_vector_multicore_multithread(uint32_t img_size, uint32_t max_iters, uint32_t *out) {
+    int TOTAL_THREAD = NUM_THREAD_PER_CORE * NUM_CORE;
+
+    pthread_t threads[TOTAL_THREAD];
+    thread_args args[TOTAL_THREAD];
+
+    for (int i = 0; i < TOTAL_THREAD; ++i) {
+        args[i].img_size = img_size;
+        args[i].max_iters = max_iters;
+        args[i].thread_id = i;
+        args[i].out = out;
+        pthread_create(&threads[i], NULL, mandelbrot_cpu_vector_multithread_wrapper, &args[i]);
+    }
+
+    for (int j = 0; j < TOTAL_THREAD; ++j) {
+        pthread_join(threads[j], NULL);
+    }
 }
 
 ////////////////////////////////////////////////////////////////////////////////
