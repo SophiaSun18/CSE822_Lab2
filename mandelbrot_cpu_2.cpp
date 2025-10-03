@@ -13,7 +13,8 @@ constexpr float window_zoom = 1.0 / 10000.0f;
 constexpr float window_x = -0.743643887 - 0.5 * window_zoom;
 constexpr float window_y = 0.131825904 - 0.5 * window_zoom;
 constexpr uint32_t default_max_iters = 2000;
-const int NUM_THREAD = 8;
+const int VECTOR_SIZE = 8;
+int NUM_THREAD_SINGLE = 8;
 
 // CPU Scalar Mandelbrot set generation.
 // Based on the "optimized escape time algorithm" in
@@ -69,7 +70,6 @@ uint32_t ceil_div(uint32_t a, uint32_t b) { return (a + b - 1) / b; }
 // Vector + ILP
 
 void mandelbrot_cpu_vector_ilp(uint32_t img_size, uint32_t max_iters, uint32_t *out) {
-    const int vector_size = 8;
     const float scale_scalar = window_zoom / float(img_size);
     const __m256 v_scale = _mm256_set1_ps(scale_scalar);
     const __m256 v_wx = _mm256_set1_ps(window_x);
@@ -83,7 +83,7 @@ void mandelbrot_cpu_vector_ilp(uint32_t img_size, uint32_t max_iters, uint32_t *
         float cy_scalar = (float(i) / float(img_size)) * window_zoom + window_y;;
         __m256 cy = _mm256_set1_ps(cy_scalar);
 
-        for (uint64_t j = 0; j < img_size; j += 2 * vector_size) {
+        for (uint64_t j = 0; j < img_size; j += 2 * VECTOR_SIZE) {
             // Get the plane coordinate X for the image pixel.
             __m256 cx_1 = _mm256_set_ps(
                 float(j + 7), float(j + 6), float(j + 5), float(j + 4),
@@ -161,7 +161,7 @@ void mandelbrot_cpu_vector_ilp(uint32_t img_size, uint32_t max_iters, uint32_t *
 
             // Write result.
             _mm256_storeu_si256((__m256i*)&out[i*img_size + j], iters_1);
-            _mm256_storeu_si256((__m256i*)&out[i*img_size + j + vector_size], iters_2);
+            _mm256_storeu_si256((__m256i*)&out[i*img_size + j + VECTOR_SIZE], iters_2);
         }
     }
 }
@@ -177,7 +177,6 @@ typedef struct {
 } thread_args;
 
 void mandelbrot_cpu_vector_thread(uint32_t img_size, uint32_t max_iters, uint32_t thread_id, uint32_t *out) {
-    const int vector_size = 8;
     const float scale_scalar = window_zoom / float(img_size);
     const __m256 v_scale = _mm256_set1_ps(scale_scalar);
     const __m256 v_wx = _mm256_set1_ps(window_x);
@@ -185,12 +184,12 @@ void mandelbrot_cpu_vector_thread(uint32_t img_size, uint32_t max_iters, uint32_
     const __m256 r_4 = _mm256_set1_ps(4.0f);
     const __m256i one = _mm256_set1_epi32(1);
 
-    const uint32_t chunk_size = (img_size + NUM_THREAD - 1) / NUM_THREAD;
+    const uint32_t chunk_size = (img_size + NUM_THREAD_SINGLE - 1) / NUM_THREAD_SINGLE;
     uint64_t start = thread_id * chunk_size;
     uint64_t end = start + chunk_size;
     if (end > img_size) end = img_size;
 
-    for (uint64_t j = start; j + vector_size <= end; j += vector_size) {
+    for (uint64_t j = start; j + VECTOR_SIZE <= end; j += VECTOR_SIZE) {
         // Get the plane coordinate X for the image pixel.
         // cx can be shared by all current rows.
         __m256 cx = _mm256_set_ps(
@@ -253,10 +252,10 @@ void* mandelbrot_cpu_vector_thread_wrapper(void* arg) {
 }
 
 void mandelbrot_cpu_vector_multicore(uint32_t img_size, uint32_t max_iters, uint32_t *out) {
-    pthread_t threads[NUM_THREAD];
-    thread_args args[NUM_THREAD];
+    pthread_t threads[NUM_THREAD_SINGLE];
+    thread_args args[NUM_THREAD_SINGLE];
 
-    for (int i = 0; i < NUM_THREAD; ++i) {
+    for (int i = 0; i < NUM_THREAD_SINGLE; ++i) {
         args[i].img_size = img_size;
         args[i].max_iters = max_iters;
         args[i].thread_id = i;
@@ -264,7 +263,7 @@ void mandelbrot_cpu_vector_multicore(uint32_t img_size, uint32_t max_iters, uint
         pthread_create(&threads[i], NULL, mandelbrot_cpu_vector_thread_wrapper, &args[i]);
     }
 
-    for (int j = 0; j < NUM_THREAD; ++j) {
+    for (int j = 0; j < NUM_THREAD_SINGLE; ++j) {
         pthread_join(threads[j], NULL);
     }
 }
