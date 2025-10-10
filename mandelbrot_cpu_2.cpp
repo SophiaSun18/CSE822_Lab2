@@ -233,59 +233,52 @@ typedef struct {
 } thread_args;
 
 void mandelbrot_cpu_vector_thread(uint32_t img_size, uint32_t max_iters, uint32_t thread_id, uint32_t *out) {
-    const float scale_scalar = window_zoom / float(img_size);
-    const __m256 v_scale = _mm256_set1_ps(scale_scalar);
-    const __m256 v_wx = _mm256_set1_ps(window_x);
-    const __m256 r_4 = _mm256_set1_ps(4.0f);
-    const __m256i one = _mm256_set1_epi32(1);
+    const float scalar = window_zoom / float(img_size);
+    const __m512 v_scale = _mm512_set1_ps(scalar);
+    const __m512 v_wx = _mm512_set1_ps(window_x);
+    const __m512 r_4 = _mm512_set1_ps(4.0f);
 
     for (uint64_t i = thread_id; i < img_size; i+=NUM_THREAD_SINGLE) {
         // Compute cy_scalar repeatedly, which is cheaper than computing cx.
-        float cy_scalar = float(i) * scale_scalar + window_y;;
-        __m256 cy = _mm256_set1_ps(cy_scalar);
+        float cy_scalar = float(i) * scalar + window_y;
+        __m512 cy = _mm512_set1_ps(cy_scalar);
 
         for (uint64_t j = 0; j + VECTOR_SIZE <= img_size; j+=VECTOR_SIZE) {
             // Get the plane coordinate X for the image pixel.
             // cx can be shared by all current rows.
-            __m256 cx = _mm256_set_ps(
+            __m512 cx = _mm512_set_ps(
+                float(j + 15), float(j + 14), float(j + 13), float(j + 12),
+                float(j + 11), float(j + 10), float(j + 9), float(j + 8),
                 float(j + 7), float(j + 6), float(j + 5), float(j + 4),
                 float(j + 3), float(j + 2), float(j + 1), float(j));
-            cx = _mm256_add_ps(_mm256_mul_ps(cx, v_scale), v_wx);
+            cx = _mm512_add_ps(_mm512_mul_ps(cx, v_scale), v_wx);
 
             // Innermost loop: start the recursion from z = 0.
-            __m256 x2 = _mm256_set1_ps(0.0f);
-            __m256 y2 = _mm256_set1_ps(0.0f);
-            __m256 w = _mm256_set1_ps(0.0f);
-            __m256i iters = _mm256_set1_epi32(0);
+            __m512 x2 = _mm512_set1_ps(0.0f);
+            __m512 y2 = _mm512_set1_ps(0.0f);
+            __m512 w = _mm512_set1_ps(0.0f);
+            __m512i iters = _mm512_set1_epi32(0);
+            __mmask16 active = 0xFFFF;
 
             for (uint32_t k = 0; k < max_iters; k++) {
-
                 // Calculate x2 + y2 and check if sum <= 4.0f to generate new mask.
-                __m256 sum = _mm256_add_ps(x2, y2);
-                __m256 mask_ps = _mm256_cmp_ps(sum, r_4, _CMP_LE_OQ);
-                __m256i mask = _mm256_castps_si256(mask_ps);
+                __m512 sum = _mm512_add_ps(x2, y2);
+                active = _mm512_cmp_ps_mask(sum, r_4, _CMP_LE_OQ);
 
-                // Early exit if both groups are done
-                if (_mm256_testz_si256(mask, mask)) break;
+                // Update iters based on current active bits.
+                iters = _mm512_mask_add_epi32(iters, active, iters, _mm512_set1_epi32(1));
+                if (active == 0) break;
 
-                __m256 x_new = _mm256_add_ps(_mm256_sub_ps(x2, y2), cx);
-                __m256 y_new = _mm256_add_ps(_mm256_sub_ps(w, sum), cy);
-                __m256 z_new = _mm256_add_ps(x_new, y_new);
-                __m256 w_new = _mm256_mul_ps(z_new, z_new);
-                __m256 x2_new = _mm256_mul_ps(x_new, x_new);
-                __m256 y2_new = _mm256_mul_ps(y_new, y_new);
-
-                // Update x2 and y2 according to the mask.
-                x2 = _mm256_blendv_ps(x2, x2_new, mask_ps);
-                y2 = _mm256_blendv_ps(y2, y2_new, mask_ps);
-                w = _mm256_blendv_ps(w, w_new, mask_ps);
-
-                // Update iters based on the number of active elements.
-                iters = _mm256_add_epi32(iters, _mm256_and_si256(one, mask));
+                __m512 x = _mm512_add_ps(_mm512_sub_ps(x2, y2), cx);
+                __m512 y = _mm512_add_ps(_mm512_sub_ps(w, sum), cy);
+                x2 = _mm512_mul_ps(x, x);
+                y2 = _mm512_mul_ps(y, y);
+                __m512 z = _mm512_add_ps(x, y);
+                w = _mm512_mul_ps(z, z);
             }
 
             // Write result.
-            _mm256_storeu_si256((__m256i*)&out[i*img_size + j], iters);
+            _mm512_storeu_si512((__m512i*)&out[i * img_size + j], iters);
         }
     }
 }
