@@ -654,6 +654,7 @@ void dump_image(
 // Main function.
 // Compile with:
 //  g++ -march=native -O3 -Wall -Wextra -o mandelbrot mandelbrot_cpu.cc
+//  nvcc -O3 -arch=sm_61 -o mandelbrot_gpu mandelbrot_gpu_2.cu
 int main(int argc, char *argv[]) {
     // Get Mandelbrot spec.
     uint32_t img_size = 1024;
@@ -676,6 +677,26 @@ int main(int argc, char *argv[]) {
     // Test the desired kernels.
 #ifdef HAS_VECTOR_IMPL
     if (impl == VECTOR || impl == ALL) {
+        CUDA_CHECK(cudaMemset(result_device, 0, img_size * img_size * sizeof(uint32_t)));
+        BENCHPRESS(
+            launch_mandelbrot_gpu_scalar,
+            1,
+            4,
+            img_size,
+            max_iters,
+            result_device);
+        // Copy result back.
+        CUDA_CHECK(cudaMemcpy(
+            result_host.data(),
+            result_device,
+            img_size * img_size * sizeof(uint32_t),
+            cudaMemcpyDeviceToHost));
+        dump_image("out/mandelbrot_gpu_scalar.bmp", img_size, max_iters, result_host);
+        // Check for correctness.
+        std::cout << "  Correctness: average output difference from reference "
+                  << difference(img_size, max_iters, result_host, ref_result)
+                  << std::endl;
+
         CUDA_CHECK(cudaMemset(result_device, 0, img_size * img_size * sizeof(uint32_t)));
         BENCHPRESS(
             launch_mandelbrot_gpu_vector,
