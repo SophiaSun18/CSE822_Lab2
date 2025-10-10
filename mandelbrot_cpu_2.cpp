@@ -13,10 +13,11 @@ constexpr float window_zoom = 1.0 / 10000.0f;
 constexpr float window_x = -0.743643887 - 0.5 * window_zoom;
 constexpr float window_y = 0.131825904 - 0.5 * window_zoom;
 constexpr uint32_t default_max_iters = 2000;
-const int VECTOR_SIZE = 8;
+const int VECTOR_SIZE = 16;
+const int UNROLL_FACTOR = 4;
 int NUM_THREAD_SINGLE = 8;
-int NUM_THREAD_PER_CORE = 4;
-int NUM_CORE = 24;
+int NUM_THREAD_PER_CORE = 2;
+int NUM_CORE = 10;
 
 // CPU Scalar Mandelbrot set generation.
 // Based on the "optimized escape time algorithm" in
@@ -119,7 +120,6 @@ void mandelbrot_cpu_vector_256(uint32_t img_size, uint32_t max_iters, uint32_t *
 }
 
 void mandelbrot_cpu_vector_512(uint32_t img_size, uint32_t max_iters, uint32_t *out) {
-    const int vector_size = 16;
     const float scalar = window_zoom / float(img_size);
     const __m512 v_scale = _mm512_set1_ps(scalar);
     const __m512 v_wx = _mm512_set1_ps(window_x);
@@ -129,7 +129,7 @@ void mandelbrot_cpu_vector_512(uint32_t img_size, uint32_t max_iters, uint32_t *
         float cy_scalar = float(i) * scalar + window_y;
         __m512 cy = _mm512_set1_ps(cy_scalar);
 
-        for (uint64_t j = 0; j < img_size; j+=vector_size) {
+        for (uint64_t j = 0; j < img_size; j+=VECTOR_SIZE) {
             // Get the plane coordinate X for the image pixel.
             __m512 cx = _mm512_set_ps(
                 float(j + 15), float(j + 14), float(j + 13), float(j + 12),
@@ -145,7 +145,7 @@ void mandelbrot_cpu_vector_512(uint32_t img_size, uint32_t max_iters, uint32_t *
             __m512i iters = _mm512_set1_epi32(0);
             __mmask16 active = 0xFFFF;
 
-            for (uint32_t i = 0; i < max_iters; i++) {
+            for (uint32_t k = 0; k < max_iters; k++) {
                 // Calculate x2 + y2 and check if sum <= 4.0f to generate new mask.
                 __m512 sum = _mm512_add_ps(x2, y2);
                 active = _mm512_cmp_ps_mask(sum, r_4, _CMP_LE_OQ);
