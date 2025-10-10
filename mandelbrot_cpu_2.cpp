@@ -171,53 +171,65 @@ void mandelbrot_cpu_vector_512(uint32_t img_size, uint32_t max_iters, uint32_t *
 ////////////////////////////////////////////////////////////////////////////////
 // Vector + ILP
 
-
-void mandelbrot_cpu_vector_ilp(uint32_t img_size, uint32_t max_iters, uint32_t *out, int unroll_factor=2) {
-    const int vector_size = 16;
+void mandelbrot_cpu_vector_ilp(uint32_t img_size, uint32_t max_iters, uint32_t *out) {
     const float scalar = window_zoom / float(img_size);
     const __m512 v_scale = _mm512_set1_ps(scalar);
     const __m512 v_wx = _mm512_set1_ps(window_x);
     const __m512 r_4 = _mm512_set1_ps(4.0f);
 
-    for (uint64_t j = 0; j < img_size; j+=vector_size) {
-        // Get the plane coordinate X for the image pixel.
-        __m512 cx = _mm512_set_ps(
-            float(j + 15), float(j + 14), float(j + 13), float(j + 12),
-            float(j + 11), float(j + 10), float(j + 9), float(j + 8),
-            float(j + 7), float(j + 6), float(j + 5), float(j + 4),
-            float(j + 3), float(j + 2), float(j + 1), float(j));
-        cx = _mm512_add_ps(_mm512_mul_ps(cx, v_scale), v_wx);
-                
-        for (uint64_t i = 0; i < img_size; i++) {
-            float cy_scalar = float(i) * scalar + window_y;
-            __m512 cy = _mm512_set1_ps(cy_scalar);
+    for (uint64_t i = 0; i < img_size; i+=UNROLL_FACTOR) {
+        for (uint64_t j = 0; j < img_size; j+=VECTOR_SIZE) {
+            __m512 cx = _mm512_set_ps(
+                float(j + 15), float(j + 14), float(j + 13), float(j + 12),
+                float(j + 11), float(j + 10), float(j + 9), float(j + 8),
+                float(j + 7), float(j + 6), float(j + 5), float(j + 4),
+                float(j + 3), float(j + 2), float(j + 1), float(j));
+            cx = _mm512_add_ps(_mm512_mul_ps(cx, v_scale), v_wx);
 
-            // Innermost loop: start the recursion from z = 0.
-            __m512 x2 = _mm512_set1_ps(0.0f);
-            __m512 y2 = _mm512_set1_ps(0.0f);
-            __m512 w = _mm512_set1_ps(0.0f);
-            __m512i iters = _mm512_set1_epi32(0);
-            __mmask16 active = 0xFFFF;
+            __m512 vec_cy[UNROLL_FACTOR];
+            __m512 vec_x2[UNROLL_FACTOR];
+            __m512 vec_y2[UNROLL_FACTOR];
+            __m512 vec_w[UNROLL_FACTOR];
+            __m512i vec_iters[UNROLL_FACTOR];
+            __mmask16 active[UNROLL_FACTOR];
 
-            for (uint32_t k = 0; k < max_iters; k++) {
-                // Calculate x2 + y2 and check if sum <= 4.0f to generate new mask.
-                __m512 sum = _mm512_add_ps(x2, y2);
-                active = _mm512_cmp_ps_mask(sum, r_4, _CMP_LE_OQ);
-
-                // Update iters based on current active bits.
-                iters = _mm512_mask_add_epi32(iters, active, iters, _mm512_set1_epi32(1));
-                if (active == 0) break;
-
-                __m512 x = _mm512_add_ps(_mm512_sub_ps(x2, y2), cx);
-                __m512 y = _mm512_add_ps(_mm512_sub_ps(w, sum), cy);
-                x2 = _mm512_mul_ps(x, x);
-                y2 = _mm512_mul_ps(y, y);
-                __m512 z = _mm512_add_ps(x, y);
-                w = _mm512_mul_ps(z, z);
+            #pragma GCC unroll UNROLL_FACTOR
+            for (int k = 0; k < UNROLL_FACTOR; k++) {
+                float cy_scalar = float(i + k) * scalar + window_y;
+                vec_cy[k] = _mm512_set1_ps(cy_scalar);
+                vec_x2[k] = _mm512_set1_ps(0.0f);
+                vec_y2[k] = _mm512_set1_ps(0.0f);
+                vec_w[k] = _mm512_set1_ps(0.0f);
+                vec_iters[k] = _mm512_set1_epi32(0);
+                active[k] = 0xFFFF;
             }
 
-            // Write result.
-            _mm512_storeu_si512((__m512i*)&out[i * img_size + j], iters);
+            for (uint32_t m = 0; m < max_iters; m++) {
+                #pragma GCC unroll UNROLL_FACTOR
+                for (int k = 0; k < UNROLL_FACTOR; k++) {
+                    __m512 sum = _mm512_add_ps(vec_x2[k], vec_y2[k]);
+                    vec_iters[k] = _mm512_mask_add_epi32(vec_iters[k], active[k], vec_iters[k], _mm512_set1_epi32(1));
+
+                    __m512 x = _mm512_add_ps(_mm512_sub_ps(vec_x2[k], vec_y2[k]), cx);
+                    __m512 y = _mm512_add_ps(_mm512_sub_ps(vec_w[k], sum), vec_cy[k]);
+                    vec_x2[k] = _mm512_mul_ps(x, x);
+                    vec_y2[k] = _mm512_mul_ps(y, y);
+                    __m512 z = _mm512_add_ps(x, y);
+                    vec_w[k] = _mm512_mul_ps(z, z);
+                }
+                #pragma GCC unroll UNROLL_FACTOR
+                for (int k = 0; k < UNROLL_FACTOR; k++) {
+                    active[k] = _mm512_cmp_ps_mask(_mm512_add_ps(vec_x2[k], vec_y2[k]), r_4, _CMP_LE_OQ);
+                }
+                if (active[0] == 0 && active[1] == 0 && active[2] == 0 && active[3] == 0) {
+                    break;
+                }
+            }
+
+            #pragma GCC unroll UNROLL_FACTOR
+            for (int k = 0; k < UNROLL_FACTOR; k++) {
+                _mm512_storeu_si512((__m512i*)&out[(i + k) * img_size + j], vec_iters[k]);
+            }
         }
     }
 }
