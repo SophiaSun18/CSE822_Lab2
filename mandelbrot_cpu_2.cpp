@@ -413,98 +413,68 @@ void mandelbrot_cpu_vector_multicore_multithread(uint32_t img_size, uint32_t max
 // Vector + Multi-core + Multi-thread-per-core + ILP
 
 void mandelbrot_cpu_vector_multicore_multithread_ilp_thread(uint32_t img_size, uint32_t max_iters, uint32_t thread_id, uint32_t *out) {
-    const float scale_scalar = window_zoom / float(img_size);
-    const __m256 v_scale = _mm256_set1_ps(scale_scalar);
-    const __m256 v_wx = _mm256_set1_ps(window_x);
-    const __m256 r_4 = _mm256_set1_ps(4.0f);
-    const __m256i one = _mm256_set1_epi32(1);
+    const float scalar = window_zoom / float(img_size);
+    const __m512 v_scale = _mm512_set1_ps(scalar);
+    const __m512 v_wx = _mm512_set1_ps(window_x);
+    const __m512 r_4 = _mm512_set1_ps(4.0f);
 
     int TOTAL_THREAD = NUM_THREAD_PER_CORE * NUM_CORE;
-
-    for (uint64_t i = thread_id; i < img_size; i+=TOTAL_THREAD) {
-        // Compute cy_scalar repeatedly, which is cheaper than computing cx.
-        float cy_scalar = float(i) * scale_scalar + window_y;;
-        __m256 cy = _mm256_set1_ps(cy_scalar);
-
-        for (uint64_t j = 0; j + 2 * VECTOR_SIZE <= img_size; j+=2*VECTOR_SIZE) {
-            // Get the plane coordinate X for the image pixel.
-            __m256 cx_1 = _mm256_set_ps(
+    
+    for (uint64_t base_i = thread_id * UNROLL_FACTOR; base_i < img_size; base_i+=UNROLL_FACTOR*TOTAL_THREAD) {
+        for (uint64_t j = 0; j < img_size; j+=VECTOR_SIZE) {
+            __m512 cx = _mm512_set_ps(
+                float(j + 15), float(j + 14), float(j + 13), float(j + 12),
+                float(j + 11), float(j + 10), float(j + 9), float(j + 8),
                 float(j + 7), float(j + 6), float(j + 5), float(j + 4),
                 float(j + 3), float(j + 2), float(j + 1), float(j));
-            cx_1 = _mm256_add_ps(_mm256_mul_ps(cx_1, v_scale), v_wx);
+            cx = _mm512_add_ps(_mm512_mul_ps(cx, v_scale), v_wx);
 
-            __m256 cx_2 = _mm256_set_ps(
-                float(j + 15), float(j + 14), float(j + 13), float(j + 12),
-                float(j + 11), float(j + 10), float(j + 9), float(j + 8));
-            cx_2 = _mm256_add_ps(_mm256_mul_ps(cx_2, v_scale), v_wx);
+            __m512 vec_cy[UNROLL_FACTOR];
+            __m512 vec_x2[UNROLL_FACTOR];
+            __m512 vec_y2[UNROLL_FACTOR];
+            __m512 vec_w[UNROLL_FACTOR];
+            __m512i vec_iters[UNROLL_FACTOR];
+            __mmask16 active[UNROLL_FACTOR];
 
-            // Innermost loop: start the recursion from z = 0.
-            __m256 x2_1 = _mm256_set1_ps(0.0f);
-            __m256 y2_1 = _mm256_set1_ps(0.0f);
-            __m256 w_1 = _mm256_set1_ps(0.0f);
-            __m256i iters_1 = _mm256_set1_epi32(0);
+            #pragma GCC unroll UNROLL_FACTOR
+            for (int k = 0; k < UNROLL_FACTOR; k++) {
+                uint64_t i = base_i + k;
+                float cy_scalar = float(i) * scalar + window_y;
+                vec_cy[k] = _mm512_set1_ps(cy_scalar);
+                vec_x2[k] = _mm512_set1_ps(0.0f);
+                vec_y2[k] = _mm512_set1_ps(0.0f);
+                vec_w[k] = _mm512_set1_ps(0.0f);
+                vec_iters[k] = _mm512_set1_epi32(0);
+                active[k] = 0xFFFF;
+            }
 
-            __m256 x2_2 = _mm256_set1_ps(0.0f);
-            __m256 y2_2 = _mm256_set1_ps(0.0f);
-            __m256 w_2 = _mm256_set1_ps(0.0f);
-            __m256i iters_2 = _mm256_set1_epi32(0);
+            for (uint32_t m = 0; m < max_iters; m++) {
+                #pragma GCC unroll UNROLL_FACTOR
+                for (int k = 0; k < UNROLL_FACTOR; k++) {
+                    __m512 sum = _mm512_add_ps(vec_x2[k], vec_y2[k]);
+                    vec_iters[k] = _mm512_mask_add_epi32(vec_iters[k], active[k], vec_iters[k], _mm512_set1_epi32(1));
 
-            for (uint32_t k = 0; k < max_iters; k++) {
-
-                // Calculate x2 + y2 and check if sum <= 4.0f to generate new mask.
-                __m256 sum_1 = _mm256_add_ps(x2_1, y2_1);
-                __m256 mask_ps_1 = _mm256_cmp_ps(sum_1, r_4, _CMP_LE_OQ);
-                __m256i mask_1 = _mm256_castps_si256(mask_ps_1);
-
-                __m256 sum_2 = _mm256_add_ps(x2_2, y2_2);
-                __m256 mask_ps_2 = _mm256_cmp_ps(sum_2, r_4, _CMP_LE_OQ);
-                __m256i mask_2 = _mm256_castps_si256(mask_ps_2);
-
-                // Early exit if both groups are done
-                if (_mm256_testz_si256(mask_1, mask_1) && _mm256_testz_si256(mask_2, mask_2)) {
+                    __m512 x = _mm512_add_ps(_mm512_sub_ps(vec_x2[k], vec_y2[k]), cx);
+                    __m512 y = _mm512_add_ps(_mm512_sub_ps(vec_w[k], sum), vec_cy[k]);
+                    vec_x2[k] = _mm512_mul_ps(x, x);
+                    vec_y2[k] = _mm512_mul_ps(y, y);
+                    __m512 z = _mm512_add_ps(x, y);
+                    vec_w[k] = _mm512_mul_ps(z, z);
+                }
+                #pragma GCC unroll UNROLL_FACTOR
+                for (int k = 0; k < UNROLL_FACTOR; k++) {
+                    active[k] = _mm512_cmp_ps_mask(_mm512_add_ps(vec_x2[k], vec_y2[k]), r_4, _CMP_LE_OQ);
+                }
+                if (active[0] == 0 && active[1] == 0 && active[2] == 0 && active[3] == 0) {
                     break;
-                }
-                
-                // Group A
-                if (!_mm256_testz_si256(mask_1, mask_1)) {
-                    __m256 x_new_1 = _mm256_add_ps(_mm256_sub_ps(x2_1, y2_1), cx_1);
-                    __m256 y_new_1 = _mm256_add_ps(_mm256_sub_ps(w_1, sum_1), cy);
-                    __m256 z_new_1 = _mm256_add_ps(x_new_1, y_new_1);
-                    __m256 w_new_1 = _mm256_mul_ps(z_new_1, z_new_1);
-                    __m256 x2_new_1 = _mm256_mul_ps(x_new_1, x_new_1);
-                    __m256 y2_new_1 = _mm256_mul_ps(y_new_1, y_new_1);
-
-                    // Update x2 and y2 according to the mask.
-                    x2_1 = _mm256_blendv_ps(x2_1, x2_new_1, mask_ps_1);
-                    y2_1 = _mm256_blendv_ps(y2_1, y2_new_1, mask_ps_1);
-                    w_1 = _mm256_blendv_ps(w_1, w_new_1, mask_ps_1);
-
-                    // Update iters based on the number of active elements.
-                    iters_1 = _mm256_add_epi32(iters_1, _mm256_and_si256(one, mask_1));
-                }
-
-                // Group B
-                if (!_mm256_testz_si256(mask_2, mask_2)) {                
-                    __m256 x_new_2 = _mm256_add_ps(_mm256_sub_ps(x2_2, y2_2), cx_2);
-                    __m256 y_new_2 = _mm256_add_ps(_mm256_sub_ps(w_2, sum_2), cy);
-                    __m256 z_new_2 = _mm256_add_ps(x_new_2, y_new_2);
-                    __m256 w_new_2 = _mm256_mul_ps(z_new_2, z_new_2);
-                    __m256 x2_new_2 = _mm256_mul_ps(x_new_2, x_new_2);
-                    __m256 y2_new_2 = _mm256_mul_ps(y_new_2, y_new_2);
-
-                    // Update x2 and y2 according to the mask.
-                    x2_2 = _mm256_blendv_ps(x2_2, x2_new_2, mask_ps_2);
-                    y2_2 = _mm256_blendv_ps(y2_2, y2_new_2, mask_ps_2);
-                    w_2 = _mm256_blendv_ps(w_2, w_new_2, mask_ps_2);
-
-                    // Update iters based on the number of active elements.
-                    iters_2 = _mm256_add_epi32(iters_2, _mm256_and_si256(one, mask_2));
                 }
             }
 
-            // Write result.
-            _mm256_storeu_si256((__m256i*)&out[i*img_size + j], iters_1);
-            _mm256_storeu_si256((__m256i*)&out[i*img_size + j + VECTOR_SIZE], iters_2);
+            #pragma GCC unroll UNROLL_FACTOR
+            for (int k = 0; k < UNROLL_FACTOR; k++) {
+                uint64_t i = base_i + k;
+                _mm512_storeu_si512((__m512i*)&out[i * img_size + j], vec_iters[k]);
+            }
         }
     }
 }
